@@ -1,0 +1,62 @@
+{
+  "_format": "hh3-sol-build-info-1",
+  "id": "solc-0_8_28-72c69c7a94a292c966113aab7a10eb3879367507",
+  "solcVersion": "0.8.28",
+  "solcLongVersion": "0.8.28+commit.7893614a",
+  "compilerType": "solc",
+  "toolVersions": {
+    "hardhat": "3.13.0"
+  },
+  "userSourceNameMap": {
+    "contracts/CreditPassportASC.sol": "project/contracts/CreditPassportASC.sol"
+  },
+  "input": {
+    "language": "Solidity",
+    "settings": {
+      "evmVersion": "cancun",
+      "optimizer": {
+        "enabled": true,
+        "runs": 200
+      },
+      "outputSelection": {
+        "*": {
+          "": [
+            "ast"
+          ],
+          "*": [
+            "abi",
+            "evm.bytecode.linkReferences",
+            "evm.bytecode.object",
+            "evm.bytecode.opcodes",
+            "evm.bytecode.sourceMap",
+            "evm.deployedBytecode.immutableReferences",
+            "evm.deployedBytecode.linkReferences",
+            "evm.deployedBytecode.object",
+            "evm.deployedBytecode.opcodes",
+            "evm.deployedBytecode.sourceMap",
+            "evm.methodIdentifiers"
+          ]
+        }
+      },
+      "remappings": [],
+      "viaIR": true
+    },
+    "sources": {
+      "project/contracts/CreditPassportASC.sol": {
+        "content": "// SPDX-License-Identifier: MIT\npragma solidity ^0.8.20;\n\nimport {IUSCProofVerifier} from \"./lib/IUSCProofVerifier.sol\";\nimport {BlockProverTypes} from \"./lib/BlockProverTypes.sol\";\nimport {\n    INativeQueryVerifier,\n    NativeQueryVerifierLib\n} from \"./lib/INativeQueryVerifier.sol\";\nimport {QueryProofVerificationLib} from \"./lib/QueryProofVerificationLib.sol\";\n\n/// @title CreditPassportASC\n/// @notice Attestcoin Smart Contract for the Credit Passport project. Verifies cross-chain\n/// transaction inclusion proofs via the native Block Prover Precompile (0x0FD2).\ncontract CreditPassportASC is IUSCProofVerifier {\n    event ProofVerified(\n        bytes32 indexed chainKey,\n        uint64 blockHeight,\n        BlockProverTypes.ProofKind kind,\n        address precompileUsed,\n        bool success\n    );\n\n    error ProofInvalid(bytes32 chainKey, uint64 blockHeight);\n    error UnsupportedProofKind(BlockProverTypes.ProofKind kind);\n\n    function verifyProofs(\n        bytes32 chainKey,\n        uint64 blockHeight,\n        BlockProverTypes.InclusionProof calldata inclusionProof,\n        BlockProverTypes.ContinuityProof calldata continuityProof\n    ) external returns (bytes memory) {\n        if (inclusionProof.kind != BlockProverTypes.ProofKind.BinaryMerkle) {\n            _emitVerified(\n                chainKey,\n                blockHeight,\n                inclusionProof.kind,\n                address(0),\n                false\n            );\n            revert ProofInvalid(chainKey, blockHeight);\n        }\n        return\n            _verifyBinaryMerkle(\n                chainKey,\n                blockHeight,\n                inclusionProof,\n                continuityProof\n            );\n    }\n\n    function calculateTxIndex(\n        BlockProverTypes.InclusionProof calldata inclusionProof\n    ) external view returns (uint64) {\n        if (inclusionProof.kind != BlockProverTypes.ProofKind.BinaryMerkle) {\n            revert UnsupportedProofKind(inclusionProof.kind);\n        }\n        INativeQueryVerifier.MerkleProof\n            memory merkleProof = _nativeMerkleProof(inclusionProof);\n        return\n            NativeQueryVerifierLib.getVerifier().calculateTxIndex(merkleProof);\n    }\n\n    function _verifyBinaryMerkle(\n        bytes32 chainKey,\n        uint64 blockHeight,\n        BlockProverTypes.InclusionProof calldata inclusionProof,\n        BlockProverTypes.ContinuityProof calldata continuityProof\n    ) internal returns (bytes memory txBytes) {\n        txBytes = QueryProofVerificationLib.txBytesFromInclusion(\n            inclusionProof\n        );\n        if (txBytes.length == 0) {\n            _emitVerified(\n                chainKey,\n                blockHeight,\n                inclusionProof.kind,\n                address(0),\n                false\n            );\n            revert ProofInvalid(chainKey, blockHeight);\n        }\n\n        if (!NativeQueryVerifierLib.hasPrecompile()) {\n            _emitVerified(\n                chainKey,\n                blockHeight,\n                inclusionProof.kind,\n                address(0),\n                false\n            );\n            revert ProofInvalid(chainKey, blockHeight);\n        }\n\n        bool ok = _verifyViaNativeQueryPrecompile(\n            chainKey,\n            blockHeight,\n            txBytes,\n            inclusionProof,\n            continuityProof\n        );\n        _emitVerified(\n            chainKey,\n            blockHeight,\n            inclusionProof.kind,\n            address(NativeQueryVerifierLib.getVerifier()),\n            ok\n        );\n        if (!ok) revert ProofInvalid(chainKey, blockHeight);\n    }\n\n    function _verifyViaNativeQueryPrecompile(\n        bytes32 chainKey,\n        uint64 blockHeight,\n        bytes memory txBytes,\n        BlockProverTypes.InclusionProof calldata inclusionProof,\n        BlockProverTypes.ContinuityProof calldata continuityProof\n    ) internal returns (bool) {\n        INativeQueryVerifier.MerkleProof\n            memory merkleProof = _nativeMerkleProof(inclusionProof);\n        INativeQueryVerifier.ContinuityProof\n            memory nativeContinuity = INativeQueryVerifier.ContinuityProof({\n                lowerEndpointDigest: continuityProof.lowerEndpointDigest,\n                roots: continuityProof.roots\n            });\n\n        return\n            NativeQueryVerifierLib.getVerifier().verifyAndEmit(\n                uint64(uint256(chainKey)),\n                blockHeight,\n                txBytes,\n                merkleProof,\n                nativeContinuity\n            );\n    }\n\n    function _nativeMerkleProof(\n        BlockProverTypes.InclusionProof calldata inclusionProof\n    )\n        internal\n        pure\n        returns (INativeQueryVerifier.MerkleProof memory merkleProof)\n    {\n        BlockProverTypes.MerkleProofEntry[] memory siblings = _merkleSiblings(\n            inclusionProof\n        );\n        INativeQueryVerifier.MerkleProofEntry[]\n            memory nativeSiblings = new INativeQueryVerifier.MerkleProofEntry[](\n                siblings.length\n            );\n        for (uint256 i = 0; i < siblings.length; i++) {\n            nativeSiblings[i] = INativeQueryVerifier.MerkleProofEntry({\n                hash: siblings[i].sibling,\n                isLeft: siblings[i].isLeft\n            });\n        }\n        merkleProof = INativeQueryVerifier.MerkleProof({\n            root: inclusionProof.root,\n            siblings: nativeSiblings\n        });\n    }\n\n    function _merkleSiblings(\n        BlockProverTypes.InclusionProof calldata inclusionProof\n    )\n        internal\n        pure\n        returns (BlockProverTypes.MerkleProofEntry[] memory siblings)\n    {\n        (, siblings) = QueryProofVerificationLib.decodeBinaryMerklePayload(\n            inclusionProof.data\n        );\n    }\n\n    function _emitVerified(\n        bytes32 chainKey,\n        uint64 blockHeight,\n        BlockProverTypes.ProofKind kind,\n        address precompileUsed,\n        bool success\n    ) internal {\n        emit ProofVerified(\n            chainKey,\n            blockHeight,\n            kind,\n            precompileUsed,\n            success\n        );\n    }\n}\n"
+      },
+      "project/contracts/lib/BlockProverTypes.sol": {
+        "content": "// SPDX-License-Identifier: MIT\npragma solidity ^0.8.20;\n\nlibrary BlockProverTypes {\n    enum ProofKind {\n        BinaryMerkle\n    }\n\n    struct MerkleProofEntry {\n        bytes32 sibling;\n        bool isLeft;\n    }\n\n    struct InclusionProof {\n        ProofKind kind;\n        bytes32 root;\n        bytes data;\n    }\n\n    struct ContinuityProof {\n        bytes32 lowerEndpointDigest;\n        bytes32[] roots;\n    }\n}\n"
+      },
+      "project/contracts/lib/INativeQueryVerifier.sol": {
+        "content": "// SPDX-License-Identifier: MIT\npragma solidity ^0.8.20;\n\ninterface INativeQueryVerifier {\n    struct MerkleProofEntry {\n        bytes32 hash;\n        bool isLeft;\n    }\n\n    struct MerkleProof {\n        bytes32 root;\n        MerkleProofEntry[] siblings;\n    }\n\n    struct ContinuityProof {\n        bytes32 lowerEndpointDigest;\n        bytes32[] roots;\n    }\n\n    function verifyAndEmit(\n        uint64 chainKey,\n        uint64 height,\n        bytes calldata encodedTransaction,\n        MerkleProof calldata merkleProof,\n        ContinuityProof calldata continuityProof\n    ) external returns (bool);\n\n    function calculateTxIndex(\n        MerkleProof calldata merkleProof\n    ) external view returns (uint64);\n}\n\nlibrary NativeQueryVerifierLib {\n    address internal constant PRECOMPILE =\n        0x0000000000000000000000000000000000000FD2;\n\n    function getVerifier() internal pure returns (INativeQueryVerifier) {\n        return INativeQueryVerifier(PRECOMPILE);\n    }\n\n    function hasPrecompile() internal view returns (bool) {\n        uint256 chainId = block.chainid;\n        if (chainId == 102030 || chainId == 102031 || chainId == 102033) {\n            return true;\n        }\n        return PRECOMPILE.code.length > 0;\n    }\n}\n"
+      },
+      "project/contracts/lib/IUSCProofVerifier.sol": {
+        "content": "// SPDX-License-Identifier: MIT\npragma solidity ^0.8.20;\n\nimport {BlockProverTypes} from \"./BlockProverTypes.sol\";\n\ninterface IUSCProofVerifier {\n    function verifyProofs(\n        bytes32 chainKey,\n        uint64 blockHeight,\n        BlockProverTypes.InclusionProof calldata inclusionProof,\n        BlockProverTypes.ContinuityProof calldata continuityProof\n    ) external returns (bytes memory encodedTransaction);\n\n    function calculateTxIndex(\n        BlockProverTypes.InclusionProof calldata inclusionProof\n    ) external view returns (uint64);\n}\n"
+      },
+      "project/contracts/lib/QueryProofVerificationLib.sol": {
+        "content": "// SPDX-License-Identifier: MIT\npragma solidity ^0.8.20;\n\nimport {BlockProverTypes} from \"./BlockProverTypes.sol\";\n\nlibrary QueryProofVerificationLib {\n    function continuityDigest(\n        uint64 blockNumber,\n        bytes32 merkleRoot,\n        bytes32 prevDigest\n    ) internal pure returns (bytes32) {\n        return keccak256(abi.encodePacked(blockNumber, merkleRoot, prevDigest));\n    }\n\n    function verifyContinuity(\n        uint64 blockHeight,\n        bytes32 lowerEndpointDigest,\n        bytes32[] memory roots,\n        bytes32 inclusionMerkleRoot\n    ) internal pure returns (bool) {\n        if (roots.length == 0) {\n            return false;\n        }\n        if (roots[0] != inclusionMerkleRoot) {\n            return false;\n        }\n\n        bytes32 digest = lowerEndpointDigest;\n        for (uint256 i = 0; i < roots.length; i++) {\n            digest = continuityDigest(\n                blockHeight + uint64(i),\n                roots[i],\n                digest\n            );\n        }\n        return digest != bytes32(0);\n    }\n\n    function verifyMerkleInclusion(\n        bytes32 leaf,\n        bytes32 root,\n        BlockProverTypes.MerkleProofEntry[] memory siblings\n    ) internal pure returns (bool) {\n        bytes32 computed = leaf;\n        for (uint256 i = 0; i < siblings.length; i++) {\n            BlockProverTypes.MerkleProofEntry memory entry = siblings[i];\n            if (entry.isLeft) {\n                computed = keccak256(abi.encodePacked(entry.sibling, computed));\n            } else {\n                computed = keccak256(abi.encodePacked(computed, entry.sibling));\n            }\n        }\n        return computed == root;\n    }\n\n    function decodeBinaryMerklePayload(\n        bytes calldata data\n    )\n        internal\n        pure\n        returns (\n            bytes memory txBytes,\n            BlockProverTypes.MerkleProofEntry[] memory siblings\n        )\n    {\n        return abi.decode(data, (bytes, BlockProverTypes.MerkleProofEntry[]));\n    }\n\n    function txBytesFromInclusion(\n        BlockProverTypes.InclusionProof calldata inclusionProof\n    ) internal pure returns (bytes memory txBytes) {\n        (txBytes, ) = decodeBinaryMerklePayload(inclusionProof.data);\n    }\n}\n"
+      }
+    }
+  }
+}
