@@ -3,11 +3,35 @@ import { config } from "./config.js";
 import { SOURCE_REPAYMENT_EMITTER_ABI } from "./abi.js";
 import { resolveSourceChainKey, proveAndSubmitRepayment } from "./prove.js";
 
-async function main() {
-    const sourceProvider = new JsonRpcProvider(config.sourceChainRpcUrl);
-    const creditcoinProvider = new JsonRpcProvider(config.creditcoinRpcUrl);
+function createResilientProvider(url: string): JsonRpcProvider {
+    return new JsonRpcProvider(url, undefined, { staticNetwork: false, batchMaxCount: 1 });
+}
 
-    const sourceChainKey = await resolveSourceChainKey(creditcoinProvider);
+async function withRetries<T>(label: string, fn: () => Promise<T>, attempts = 5): Promise<T> {
+    let lastErr: unknown;
+    for (let i = 0; i < attempts; i++) {
+        try {
+            return await fn();
+        } catch (err) {
+            lastErr = err;
+            const waitMs = Math.min(2000 * 2 ** i, 30_000);
+            console.error(`[watch] ${label} failed (attempt ${i + 1}/${attempts}): ${(err as Error).message}. Retrying in ${waitMs}ms...`);
+            await new Promise((r) => setTimeout(r, waitMs));
+        }
+    }
+    throw lastErr;
+}
+
+async function main() {
+    const sourceProvider = createResilientProvider(config.sourceChainRpcUrl);
+    const creditcoinProvider = createResilientProvider(config.creditcoinRpcUrl);
+
+    await withRetries("Sepolia network detection", () => sourceProvider.getNetwork());
+    await withRetries("Creditcoin network detection", () => creditcoinProvider.getNetwork());
+
+    const sourceChainKey = await withRetries("resolveSourceChainKey", () =>
+        resolveSourceChainKey(creditcoinProvider)
+    );
     console.log(
         `[watch] Resolved source chain key: ${sourceChainKey} (EVM chainId ${config.sourceEvmChainId})`
     );
@@ -31,13 +55,21 @@ async function main() {
                 creditcoinProvider,
             });
         } catch (err) {
-            // Log and keep the worker alive.
             console.error(`[watch] Failed to prove/submit ${sourceTxHash}:`, err);
         }
     });
 }
 
-main().catch((err) => {
-    console.error(err);
-    process.exit(1);
-});
+async function mainWithRestart() {
+    while (true) {
+        try {
+            await main();
+            break;
+        } catch (err) {
+            console.error("[watch] Startup failed, restarting in 10s:", err);
+            await new Promise((r) => setTimeout(r, 10_000));
+        }
+    }
+}
+
+mainWithRestart();
