@@ -1,3 +1,5 @@
+<img src="brand/logo-wordmark-dark-bg.svg" alt="Attestcoin Credit Passport" width="480" />
+
 # Attestcoin Credit Passport
 
 A portable, cross-chain credit score that follows the *user*, not the chain, computed by an AI-driven scoring engine from cryptographically attested onchain behavior and used to autonomously adjust that user's real lending terms as new attested data arrives. Not a static score on a dashboard but a live, self-triggering pipeline.
